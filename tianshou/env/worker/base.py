@@ -1,5 +1,6 @@
+import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import gym
 import numpy as np
@@ -11,8 +12,10 @@ class EnvWorker(ABC):
     def __init__(self, env_fn: Callable[[], gym.Env]) -> None:
         self._env_fn = env_fn
         self.is_closed = False
-        self.result: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        self.result: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+                           np.ndarray]
         self.action_space = self.get_env_attr("action_space")  # noqa: B009
+        self.is_reset = False
 
     @abstractmethod
     def get_env_attr(self, key: str) -> Any:
@@ -22,29 +25,58 @@ class EnvWorker(ABC):
     def set_env_attr(self, key: str, value: Any) -> None:
         pass
 
-    @abstractmethod
-    def reset(self) -> Any:
-        pass
+    def send(self, action: Optional[np.ndarray]) -> None:
+        """Send action signal to low-level worker.
 
-    @abstractmethod
-    def send_action(self, action: np.ndarray) -> None:
-        pass
+        When action is None, it indicates sending "reset" signal; otherwise
+        it indicates "step" signal. The paired return value from "recv"
+        function is determined by such kind of different signal.
+        """
+        if hasattr(self, "send_action"):
+            warnings.warn(
+                "send_action will soon be deprecated. "
+                "Please use send and recv for your own EnvWorker."
+            )
+            if action is None:
+                self.is_reset = True
+                self.result = self.reset()
+            else:
+                self.is_reset = False
+                self.send_action(action)  # type: ignore
 
-    def get_result(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def recv(
+        self
+    ) -> Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+        """Receive result from low-level worker.
+
+        If the last "send" function sends a NULL action, it only returns a
+        single observation; otherwise it returns a tuple of (obs, rew, done,
+        info).
+        """
+        if hasattr(self, "get_result"):
+            warnings.warn(
+                "get_result will soon be deprecated. "
+                "Please use send and recv for your own EnvWorker."
+            )
+            if not self.is_reset:
+                self.result = self.get_result()  # type: ignore
         return self.result
+
+    def reset(self) -> np.ndarray:
+        self.send(None)
+        return self.recv()  # type: ignore
 
     def step(
         self, action: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Perform one timestep of the environment's dynamic.
 
-        "send_action" and "get_result" are coupled in sync simulation, so
-        typically users only call "step" function. But they can be called
-        separately in async simulation, i.e. someone calls "send_action" first,
-        and calls "get_result" later.
+        "send" and "recv" are coupled in sync simulation, so users only call
+        "step" function. But they can be called separately in async
+        simulation, i.e. someone calls "send" first, and calls "recv" later.
         """
-        self.send_action(action)
-        return self.get_result()
+        self.send(action)
+        return self.recv()  # type: ignore
 
     @staticmethod
     def wait(

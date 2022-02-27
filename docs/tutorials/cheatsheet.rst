@@ -63,14 +63,11 @@ To correctly render the data (including several tfevent files), we highly recomm
 Parallel Sampling
 -----------------
 
-Tianshou provides the following classes for parallel environment simulation:
+Tianshou provides the following classes for vectorized environment:
 
 - :class:`~tianshou.env.DummyVectorEnv` is for pseudo-parallel simulation (implemented with a for-loop, useful for debugging).
-
 - :class:`~tianshou.env.SubprocVectorEnv` uses multiple processes for parallel simulation. This is the most often choice for parallel simulation.
-
 - :class:`~tianshou.env.ShmemVectorEnv` has a similar implementation to :class:`~tianshou.env.SubprocVectorEnv`, but is optimized (in terms of both memory footprint and simulation speed) for environments with large observations such as images.
-
 - :class:`~tianshou.env.RayVectorEnv` is currently the only choice for parallel simulation in a cluster with multiple machines.
 
 Although these classes are optimized for different scenarios, they have exactly the same APIs because they are sub-classes of :class:`~tianshou.env.BaseVectorEnv`. Just provide a list of functions who return environments upon called, and it is all set.
@@ -119,6 +116,24 @@ The figure in the right gives an intuitive comparison among synchronous/asynchro
 
     Otherwise, the outputs of these envs may be the same with each other.
 
+.. _envpool_integration:
+
+EnvPool Integration
+-------------------
+
+`EnvPool <https://github.com/sail-sg/envpool/>`_ is a C++-based vectorized environment implementation and is way faster than the above solutions. The APIs are almost the same as above four classes, so that means you can directly switch the vectorized environment to envpool and get immediate speed-up.
+
+Currently it supports Atari, VizDoom, toy_text and classic_control environments. For more information, please refer to `EnvPool's documentation <https://envpool.readthedocs.io/en/latest/>`_.
+
+::
+
+    # install envpool: pip3 install envpool
+
+    import envpool
+    envs = envpool.make_gym("CartPole-v0", num_envs=10)
+    collector = Collector(policy, envs, buffer)
+
+Here are some examples: https://github.com/sail-sg/envpool/tree/master/examples/tianshou_examples
 
 .. _preprocess_fn:
 
@@ -350,7 +365,7 @@ But the state stored in the buffer may be a shallow-copy. To make sure each of y
 
     def reset():
         return copy.deepcopy(self.graph)
-    def step(a):
+    def step(action):
         ...
         return copy.deepcopy(self.graph), reward, done, {}
 
@@ -391,13 +406,13 @@ In addition, legal actions in multi-agent RL often vary with timestep (just like
 The above description gives rise to the following formulation of multi-agent RL:
 ::
 
-    action = policy(state, agent_id, mask)
-    (next_state, next_agent_id, next_mask), reward = env.step(action)
+    act = policy(state, agent_id, mask)
+    (next_state, next_agent_id, next_mask), reward = env.step(act)
 
 By constructing a new state ``state_ = (state, agent_id, mask)``, essentially we can return to the typical formulation of RL:
 ::
 
-    action = policy(state_)
-    next_state_, reward = env.step(action)
+    act = policy(state_)
+    next_state_, reward = env.step(act)
 
 Following this idea, we write a tiny example of playing `Tic Tac Toe <https://en.wikipedia.org/wiki/Tic-tac-toe>`_ against a random player by using a Q-learning algorithm. The tutorial is at :doc:`/tutorials/tictactoe`.
