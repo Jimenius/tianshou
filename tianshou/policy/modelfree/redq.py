@@ -65,7 +65,7 @@ class REDQPolicy(DDPGPolicy):
         alpha: Union[float, Tuple[float, torch.Tensor, torch.optim.Optimizer]] = 0.2,
         reward_normalization: bool = False,
         estimation_step: int = 1,
-        actor_delay: int = 20,
+        update_actor_freq: int = 20,
         exploration_noise: Optional[BaseNoise] = None,
         deterministic_eval: bool = True,
         target_mode: str = 'min',
@@ -99,9 +99,10 @@ class REDQPolicy(DDPGPolicy):
         else:
             raise ValueError('Unsupported mode of Q target computing.')
 
-        self.critic_gradient_step = 0
-        self.actor_delay = actor_delay
         self._deterministic_eval = deterministic_eval
+        self._freq = update_actor_freq
+        self._cnt = 0
+        self.losses = {}
         self.__eps = np.finfo(np.float32).eps.item()
 
     def train(self, mode: bool = True) -> "REDQPolicy":
@@ -174,10 +175,10 @@ class REDQPolicy(DDPGPolicy):
         critic_loss.backward()
         self.critics_optim.step()
         batch.weight = torch.mean(td, dim=0)  # prio-buffer
-        self.critic_gradient_step += 1
+        self.results["loss/critics"] = critic_loss.item()
 
         # actor
-        if self.critic_gradient_step % self.actor_delay == 0:
+        if self._cnt % self._freq == 0:
             obs_result = self(batch)
             a = obs_result.act
             current_qa = self.critics(batch.obs, a).mean(dim=0).flatten()
@@ -186,6 +187,7 @@ class REDQPolicy(DDPGPolicy):
             self.actor_optim.zero_grad()
             actor_loss.backward()
             self.actor_optim.step()
+            self.results["loss/actor"] = actor_loss.item()
 
             if self._is_auto_alpha:
                 log_prob = obs_result.log_prob.detach() + self._target_entropy
@@ -194,14 +196,10 @@ class REDQPolicy(DDPGPolicy):
                 alpha_loss.backward()
                 self._alpha_optim.step()
                 self._alpha = self._log_alpha.detach().exp()
+                self.results["loss/alpha"] = alpha_loss.item()
+                self.results["alpha"] = self._alpha.item()  # type: ignore
 
         self.sync_weight()
+        self._cnt += 1
 
-        result = {"loss/critics": critic_loss.item()}
-        if self.critic_gradient_step % self.actor_delay == 0:
-            result["loss/actor"] = actor_loss.item(),
-            if self._is_auto_alpha:
-                result["loss/alpha"] = alpha_loss.item()
-                result["alpha"] = self._alpha.item()  # type: ignore
-
-        return result
+        return self.results

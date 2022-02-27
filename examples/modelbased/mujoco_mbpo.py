@@ -14,18 +14,17 @@ from torch.utils.tensorboard import SummaryWriter
 from tianshou.data import (
     Collector,
     ReplayBuffer,
-    RolloutsCollector,
     SimpleReplayBuffer,
     VectorReplayBuffer,
 )
 from tianshou.env import SubprocVectorEnv
-from tianshou.env.fake import FakeEnv, GaussianModel
 from tianshou.env.mujoco.static import TERMINAL_FUNCTIONS
-from tianshou.policy import MBPOPolicy
-from tianshou.trainer import dyna_trainer
+from tianshou.policy import MBPOPolicy, SACPolicy
+from tianshou.trainer import offpolicy_trainer
 from tianshou.utils import TensorboardLogger
-from tianshou.utils.net.common import EnsembleMLPGaussian, Net
+from tianshou.utils.net.common import EnsembleMLP, Gaussian, Net
 from tianshou.utils.net.continuous import ActorProb, Critic
+from tianshou.utils.net.loss import GaussianMLELoss
 
 
 def get_args():
@@ -60,10 +59,10 @@ def get_args():
     parser.add_argument('--update-per-step', type=float, default=20.)
     parser.add_argument('--n-step', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--real-ratio', type=float, default=0.1)
+    parser.add_argument('--real-ratio', type=float, default=0.05)
     parser.add_argument('--training-num', type=int, default=1)
     parser.add_argument('--test-num', type=int, default=10)
-    parser.add_argument('--rollout-batch-size', type=int, default=100000)
+    parser.add_argument('--virtual-env-num', type=int, default=100000)
     parser.add_argument(
         '--rollout-schedule', type=int, nargs='*', default=[1, 100, 1, 1]
     )
@@ -138,13 +137,21 @@ def test_mbpo(args=get_args()):
     critic1_optim = torch.optim.Adam(critic1.parameters(), lr=args.critic_lr)
     critic2 = Critic(net_c2, device=args.device).to(args.device)
     critic2_optim = torch.optim.Adam(critic2.parameters(), lr=args.critic_lr)
-    model_net = EnsembleMLPGaussian(
+
+    state_dim = np.prod(args.state_shape).item()
+    action_dim = np.prod(args.action_shape).item()
+    net_m = EnsembleMLP(
         args.ensemble_size,
-        args.state_shape,
-        args.action_shape,
+        state_dim + action_dim,
+        (state_dim + 1) * 2,
         hidden_sizes=args.model_hidden_sizes,
         activation=nn.SiLU,
-        device=args.device
+        device=args.device,
+    )
+    model_net = Gaussian(
+        net_m,
+        ndims=3,
+        device=args.device,
     ).to(args.device)
     assert len(args.model_net_decays) == len(args.model_hidden_sizes) + 1
     parameters = []
@@ -163,15 +170,7 @@ def test_mbpo(args=get_args()):
         parameters,
         lr=args.model_lr,
     )
-    model = GaussianModel(
-        args.ensemble_size,
-        model_net,
-        model_net_optim,
-        device=args.device,
-        num_elites=args.num_elites,
-        batch_size=args.batch_size,
-        deterministic=args.deterministic
-    )
+
     domain = args.task.split("-")[0]
     terminal_fn = TERMINAL_FUNCTIONS[domain]
 
@@ -181,7 +180,7 @@ def test_mbpo(args=get_args()):
         alpha_optim = torch.optim.Adam([log_alpha], lr=args.alpha_lr)
         args.alpha = (target_entropy, log_alpha, alpha_optim)
 
-    policy = MBPOPolicy(
+    mf_policy = SACPolicy(
         actor,
         actor_optim,
         critic1,
@@ -194,10 +193,24 @@ def test_mbpo(args=get_args()):
         estimation_step=args.n_step,
         action_space=env.action_space
     )
+    policy = MBPOPolicy(
+        mf_policy,
+        model_net,
+        model_net_optim,
+        SimpleReplayBuffer,
+        GaussianMLELoss(opt_coeff=0.01),
+        terminal_fn,
+        real_ratio=args.real_ratio,
+        virtual_env_num=args.virtual_env_num,
+        deterministic_model_eval=args.deterministic,
+        device=args.device,
+    )
 
     # load a previous policy
     if args.resume_path:
-        policy.load_state_dict(torch.load(args.resume_path, map_location=args.device))
+        state_dict = torch.load(args.resume_path, map_location=args.device)
+        policy.policy.load_state_dict(state_dict['policy'])
+        policy.model.load_state_dict(state_dict['model'])
         print("Loaded agent from: ", args.resume_path)
 
     # collector
@@ -205,11 +218,11 @@ def test_mbpo(args=get_args()):
         buffer = VectorReplayBuffer(args.buffer_size, len(train_envs))
     else:
         buffer = ReplayBuffer(args.buffer_size)
-    fake_env = FakeEnv(model, buffer, terminal_fn, args.rollout_batch_size)
-    model_buffer = SimpleReplayBuffer(args.rollout_batch_size)
+    # fake_env = FakeEnv(model, buffer, terminal_fn, args.rollout_batch_size)
     train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
+    train_collector.collect(n_step=args.start_timesteps, random=True)
     test_collector = Collector(policy, test_envs)
-    model_collector = RolloutsCollector(policy, fake_env, model_buffer)
+    # model_collector = RolloutsCollector(policy, fake_env, model_buffer)
     # log
     t0 = datetime.datetime.now().strftime("%m%d_%H%M%S")
     log_file = f'seed_{args.seed}_{t0}-{args.task.replace("-", "_")}_mbpo'
@@ -218,34 +231,54 @@ def test_mbpo(args=get_args()):
     writer.add_text("args", str(args))
     logger = TensorboardLogger(writer)
 
+    def train_fn(epoch, step):
+        # Set rollout length
+        epoch_low, epoch_high, min_length, max_length = args.rollout_schedule
+        if epoch <= epoch_low:
+            rollout_length = min_length
+        else:
+            assert epoch_high > epoch_low
+            dx = min((epoch - epoch_low) / (epoch_high - epoch_low), 1)
+            rollout_length = int(dx * (max_length - min_length) + min_length)
+        policy.set_rollout_length(rollout_length)
+
+        # Reset model buffer
+        new_size = \
+            args.model_retain_epochs * \
+            rollout_length * \
+            args.virtual_env_num * \
+            args.step_per_epoch // \
+            args.model_train_freq
+        policy.update_model_buffer(new_size)
+
+        # Set learn model flag
+        if step == 0 or step % args.model_train_freq == 0:
+            policy.set_learn_model_flag(True)
+
     def save_fn(policy):
-        torch.save(policy.state_dict(), os.path.join(log_path, 'policy.pth'))
+        state_dict = {
+            'policy': policy.policy.state_dict(),
+            'model': policy.model.state_dict(),
+        }
+        torch.save(state_dict, os.path.join(log_path, 'policy.pth'))
 
     if not args.watch:
         # trainer
-        result = dyna_trainer(
+        result = offpolicy_trainer(
             policy,
-            model,
             train_collector,
             test_collector,
-            model_collector,
             args.epoch,
             args.step_per_epoch,
             args.step_per_collect,
             args.test_num,
             args.batch_size,
-            args.rollout_batch_size,
-            args.rollout_schedule,
-            args.real_ratio,
-            args.start_timesteps,
-            model_train_freq=args.model_train_freq,
-            model_retain_epochs=args.model_retain_epochs,
             update_per_step=args.update_per_step,
+            train_fn=train_fn,
             save_fn=save_fn,
             logger=logger,
             test_in_train=False
         )
-        torch.save(model.network.state_dict(), os.path.join(log_path, 'model.pth'))
         pprint.pprint(result)
 
     # Let's watch its performance!
