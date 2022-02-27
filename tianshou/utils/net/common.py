@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ def miniblock(
     output_size: int = 0,
     norm_layer: Optional[ModuleType] = None,
     activation: Optional[ModuleType] = None,
-    linear_layer: Type[nn.Linear] = nn.Linear,
+    linear_layer: Callable[[int, int], nn.Module] = nn.Linear,
 ) -> List[nn.Module]:
     """Construct a miniblock with given input/output-size, norm layer and \
     activation."""
@@ -57,7 +57,7 @@ class MLP(nn.Module):
         norm_layer: Optional[Union[ModuleType, Sequence[ModuleType]]] = None,
         activation: Optional[Union[ModuleType, Sequence[ModuleType]]] = nn.ReLU,
         device: Optional[Union[str, int, torch.device]] = None,
-        linear_layer: Type[nn.Linear] = nn.Linear,
+        linear_layer: Callable[[int, int], nn.Module] = nn.Linear,
     ) -> None:
         super().__init__()
         self.device = device
@@ -339,18 +339,14 @@ class EnsembleLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(
-            torch.empty(
-                (ensemble_size, in_features, out_features),
-                **factory_kwargs
-            )
+            torch.empty((ensemble_size, in_features, out_features),
+                        **factory_kwargs)  # type: ignore
         )
 
         if bias:
             self.bias = nn.Parameter(
-                torch.empty(
-                    (ensemble_size, 1, out_features),
-                    **factory_kwargs
-                )
+                torch.empty((ensemble_size, 1, out_features),
+                            **factory_kwargs)  # type: ignore
             )
         else:
             self.register_parameter("bias", None)
@@ -374,10 +370,8 @@ class EnsembleLinear(nn.Module):
 
     def extra_repr(self) -> str:
         return "ensemble_size={}, in_features={}, out_features={}, bias={}".format(
-            self.ensemble_size,
-            self.in_features,
-            self.out_features,
-            self.bias is not None
+            self.ensemble_size, self.in_features, self.out_features, self.bias
+            is not None
         )
 
 
@@ -418,7 +412,9 @@ class EnsembleMLP(MLP):
     ) -> None:
         self.ensemble_size = ensemble_size
 
-        def ensemble_layer_wrapper_func(input_size: int, output_size: int):
+        def ensemble_layer_wrapper_func(
+            input_size: int, output_size: int
+        ) -> nn.Module:
             return EnsembleLinear(
                 ensemble_size,
                 input_size,
@@ -427,25 +423,19 @@ class EnsembleMLP(MLP):
             )
 
         super().__init__(
-            input_dim,
-            output_dim,
-            hidden_sizes,
-            norm_layer,
-            activation,
-            device,
+            input_dim, output_dim, hidden_sizes, norm_layer, activation, device,
             ensemble_layer_wrapper_func
         )
 
     def forward(self, inputs: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
-        if self.device is not None:
-            inputs = torch.as_tensor(
-                inputs,
-                device=self.device,  # type: ignore
-                dtype=torch.float32,
-            )
+        inputs = torch.as_tensor(
+            inputs,
+            device=self.device,  # type: ignore
+            dtype=torch.float32,
+        )
         if inputs.dim() > 2:
             inputs = inputs.flatten(2)
-        return self.model(inputs)  # type: ignore
+        return self.model(inputs)
 
 
 class Gaussian(nn.Module):
@@ -470,21 +460,21 @@ class Gaussian(nn.Module):
         super().__init__()
         self.device = device
         self.net = net
-        self.output_dim = net.output_dim // 2
+        self.output_dim = net.output_dim // 2  # type: ignore
 
         minmax_shape = [1] * ndims
         minmax_shape[-1] = self.output_dim
         self.max_logvar = nn.Parameter(
             torch.empty(
                 minmax_shape,
-                device=device,
+                device=device,  # type: ignore
                 dtype=torch.float32,
             )
         )
         self.min_logvar = nn.Parameter(
             torch.empty(
                 minmax_shape,
-                device=device,
+                device=device,  # type: ignore
                 dtype=torch.float32,
             )
         )

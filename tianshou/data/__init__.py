@@ -19,7 +19,6 @@ from tianshou.data.buffer.simple import SimpleReplayBuffer
 from tianshou.data.collector import (
     Collector,
     AsyncCollector,
-    RolloutsCollector,
 )
 
 __all__ = [
@@ -38,5 +37,4 @@ __all__ = [
     "SimpleReplayBuffer",
     "Collector",
     "AsyncCollector",
-    "RolloutsCollector",
 ]

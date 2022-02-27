@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from tianshou.utils.net.common import MLP, EnsembleMLP
+from tianshou.utils.net.common import MLP
 
 SIGMA_MIN = -20
 SIGMA_MAX = 2

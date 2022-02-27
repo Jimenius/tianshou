@@ -11,7 +11,6 @@ from tianshou.data import (
     CachedReplayBuffer,
     ReplayBuffer,
     ReplayBufferManager,
-    SimpleReplayBuffer,
     VectorReplayBuffer,
     to_numpy,
 )

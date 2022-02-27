@@ -1,5 +1,5 @@
 import itertools
-from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -41,8 +41,8 @@ class MBPOPolicy(DynaPolicy):
         model: torch.nn.Module,
         model_optim: torch.optim.Optimizer,
         model_buffer_type: Type[ReplayBuffer],
-        loss_fn: Callable[[], torch.Tensor],
-        terminal_fn: Callable[[], np.ndarray],
+        loss_fn: Callable,
+        terminal_fn: Callable,
         real_ratio: float = 0.1,
         virtual_env_num: int = 100000,
         ensemble_size: int = 7,
@@ -89,9 +89,17 @@ class MBPOPolicy(DynaPolicy):
         delta_obs = obs_next - obs
         rew = batch.rew
         inputs = np.concatenate((obs, act), axis=-1)
-        inputs = torch.as_tensor(inputs, device=self.device, dtype=torch.float32)
+        inputs = torch.as_tensor(
+            inputs,
+            device=self.device,  # type: ignore
+            dtype=torch.float32
+        )
         target = np.concatenate((delta_obs, rew[..., None]), axis=-1)
-        target = torch.as_tensor(target, device=self.device, dtype=torch.float32)
+        target = torch.as_tensor(
+            target,
+            device=self.device,  # type: ignore
+            dtype=torch.float32
+        )
         return inputs, target
 
     def _learn_model(
@@ -101,6 +109,7 @@ class MBPOPolicy(DynaPolicy):
         model_learn_batch_size: int = 256,
         max_epoch: Optional[int] = None,
         max_static_epoch: int = 5,
+        **kwargs: Any
     ) -> Dict[str, Union[float, int]]:
         """Learn the transition model."""
         total_num = len(buffer)
@@ -115,6 +124,7 @@ class MBPOPolicy(DynaPolicy):
             size=(self.ensemble_size, train_num),
         )
 
+        epoch_iter: Iterable
         if max_epoch is None:
             epoch_iter = itertools.count()
         else:
@@ -152,10 +162,8 @@ class MBPOPolicy(DynaPolicy):
                 inputs, target = self._form_model_train_io(batch)
                 with torch.no_grad():
                     mean, _, _, _ = self.model(inputs)
-                batch_mse = torch.mean(
-                    torch.square(mean - target),
-                    dim=(1, 2)
-                ).cpu().numpy()
+                batch_mse = torch.mean(torch.square(mean - target),
+                                       dim=(1, 2)).cpu().numpy()
                 val_mse = (val_mse * iteration + batch_mse) / (iteration + 1)
 
             epochs_this_train += 1
@@ -185,15 +193,13 @@ class MBPOPolicy(DynaPolicy):
 
         return train_info
 
-    def _rollout_reset(self, buffer: ReplayBuffer) -> np.ndarray:
+    def _rollout_reset(self, buffer: ReplayBuffer, **kwargs: Any) -> np.ndarray:
         batch, _ = buffer.sample(self._virtual_env_num)
         obs = batch.obs.copy()
         return obs
 
     def _rollout_step(
-        self,
-        obs: np.ndarray,
-        act: np.ndarray,
+        self, obs: np.ndarray, act: np.ndarray, **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         self.model.eval()
         inputs = np.concatenate((obs, act), axis=-1)
@@ -216,8 +222,8 @@ class MBPOPolicy(DynaPolicy):
             rew = sample[choice_indices, batch_indices, -1]
             done = self._terminal_fn(obs, act, obs_next)
             log_prob = log_prob[choice_indices, batch_indices]
-            info = np.array(list(
-                map(lambda x: {"log_prob": x.item()}, torch.split(log_prob, 1))
-            ))
+            info = np.array(
+                list(map(lambda x: {"log_prob": x.item()}, torch.split(log_prob, 1)))
+            )
 
         return obs_next, rew, done, info

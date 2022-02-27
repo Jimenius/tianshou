@@ -47,22 +47,17 @@ class DynaPolicy(BasePolicy):
         self._model_buffer_type = model_buffer_type
         self._real_ratio = real_ratio
         self._virtual_env_num = virtual_env_num
-        self.reset_model_buffer(virtual_env_num)
         self._model_args = model_args
         self._rollout_length = 0
         self._learn_model_flag = False
-        self.results = dict()
+        self.results: Dict[str, Any] = {}
 
-    def reset_model_buffer(
-        self,
-        max_size: int,
-        **kwargs: Any
-    ) -> None:
+    def reset_model_buffer(self, max_size: int, *args: Any, **kwargs: Any) -> None:
         """Initialize or reset model buffer.
 
         :param max_size: buffer capacity.
         """
-        self.model_buffer = self._model_buffer_type(max_size, **kwargs)
+        self.model_buffer = self._model_buffer_type(max_size, *args, **kwargs)
 
     @abstractmethod
     def _learn_model(self, buffer: ReplayBuffer, **kwargs: Any) -> Dict[str, Any]:
@@ -76,10 +71,7 @@ class DynaPolicy(BasePolicy):
 
     @abstractmethod
     def _rollout_step(
-        self,
-        obs: np.ndarray,
-        act: np.ndarray,
-        **kwargs: Any
+        self, obs: np.ndarray, act: np.ndarray, **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Take a step in the learned model.
 
@@ -93,15 +85,16 @@ class DynaPolicy(BasePolicy):
 
         :param buffer: replay buffer for the real environment.
         """
-        data = Batch(
-            obs={}, act={}, rew={}, done={}, obs_next={}, info={}, policy={}
-        )
+        data = Batch(obs={}, act={}, rew={}, done={}, obs_next={}, info={}, policy={})
         obs = self._rollout_reset(buffer)
         data.update(obs=obs)
         for _ in range(self._rollout_length):
             with torch.no_grad():
                 act = to_numpy(self(data).act)
-                obs_next, rew, done, info = self._rollout_step(obs, act)
+                obs_next, rew, done, info = self._rollout_step(
+                    obs,
+                    act  # type: ignore
+                )
             data.update(
                 act=act,
                 obs_next=obs_next,
@@ -124,11 +117,8 @@ class DynaPolicy(BasePolicy):
         self.policy.train(mode)
         return self
 
-    def exploration_noise(
-        self,
-        act: Union[np.ndarray, Batch],
-        batch: Batch
-    ) -> Union[np.ndarray, Batch]:
+    def exploration_noise(self, act: Union[np.ndarray, Batch],
+                          batch: Batch) -> Union[np.ndarray, Batch]:
         return self.policy.exploration_noise(act, batch)
 
     def forward(
@@ -157,12 +147,8 @@ class DynaPolicy(BasePolicy):
         """Update policy with a given batch of data by inner policy."""
         return self.policy.learn(batch, **kwargs)
 
-    def update(
-        self,
-        sample_size: int,
-        buffer: Optional[ReplayBuffer],
-        **kwargs: Any
-    ) -> Dict[str, Any]:
+    def update(self, sample_size: int, buffer: Optional[ReplayBuffer],
+               **kwargs: Any) -> Dict[str, Any]:
         """Update the policy network and replay buffer."""
         if buffer is None:
             return {}
