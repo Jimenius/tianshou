@@ -18,7 +18,6 @@ from tianshou.policy.modelfree.trpo import TRPOPolicy
 from tianshou.policy.modelfree.td3 import TD3Policy
 from tianshou.policy.modelfree.sac import SACPolicy
 from tianshou.policy.modelfree.discrete_sac import DiscreteSACPolicy
-from tianshou.policy.modelfree.redq import REDQPolicy
 from tianshou.policy.imitation.base import ImitationPolicy
 from tianshou.policy.imitation.bcq import BCQPolicy
 from tianshou.policy.imitation.cql import CQLPolicy
@@ -49,7 +48,6 @@ __all__ = [
     "TD3Policy",
     "SACPolicy",
     "DiscreteSACPolicy",
-    "REDQPolicy",
     "ImitationPolicy",
     "BCQPolicy",
     "CQLPolicy",

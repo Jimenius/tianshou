@@ -436,96 +436,16 @@ class EnsembleMLP(MLP):
             ensemble_layer_wrapper_func
         )
 
-    def forward(self, input: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
+    def forward(self, inputs: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
         if self.device is not None:
-            input = torch.as_tensor(
-                input,
+            inputs = torch.as_tensor(
+                inputs,
                 device=self.device,  # type: ignore
                 dtype=torch.float32,
             )
-        if input.dim() > 2:
-            input = input.flatten(2)
-        return self.model(input)  # type: ignore
-
-
-class EnsembleNet(nn.Module):
-    """Wrapper of EnsembleMLP to support more specific DRL usage.
-
-    For advanced usage (how to customize the network), please refer to
-    :ref:`build_the_network`.
-
-    :param int ensemble_size: number of subsets in the ensemble.
-    :param state_shape: int or a sequence of int of the shape of state.
-    :param action_shape: int or a sequence of int of the shape of action.
-    :param hidden_sizes: shape of MLP passed in as a list.
-    :param norm_layer: use which normalization before activation, e.g.,
-        ``nn.LayerNorm`` and ``nn.BatchNorm1d``. Default to no normalization.
-        You can also pass a list of normalization modules with the same length
-        of hidden_sizes, to use different normalization module in different
-        layers. Default to no normalization.
-    :param activation: which activation to use after each layer, can be both
-        the same activation for all layers if passed in nn.Module, or different
-        activation for different Modules if passed in a list. Default to
-        nn.ReLU.
-    :param device: specify the device when the network actually runs. Default
-        to "cpu".
-    :param bool softmax: whether to apply a softmax layer over the last layer's
-        output.
-    :param bool concat: whether the input shape is concatenated by state_shape
-        and action_shape. If it is True, ``action_shape`` is not the output
-        shape, but affects the input shape only.
-
-    .. seealso::
-
-        Please refer to :class:`~tianshou.utils.net.common.EnsembleMLP` for more
-        detailed explanation on the usage of activation, norm_layer, etc.
-
-        You can also refer to
-        :class:`~tianshou.utils.net.continuous.EnsembleCritic`, etc, to see
-        how it's suggested be used.
-    """
-
-    def __init__(
-        self,
-        ensemble_size: int,
-        state_shape: Union[int, Sequence[int]],
-        action_shape: Union[int, Sequence[int]] = 0,
-        hidden_sizes: Sequence[int] = (),
-        norm_layer: Optional[ModuleType] = None,
-        activation: Optional[ModuleType] = nn.ReLU,
-        device: Union[str, int, torch.device] = "cpu",
-        softmax: bool = False,
-        concat: bool = False,
-    ) -> None:
-        super().__init__()
-        self.device = device
-        self.softmax = softmax
-        input_dim = int(np.prod(state_shape))
-        action_dim = int(np.prod(action_shape))
-        if concat:
-            input_dim += action_dim
-        output_dim = action_dim if not concat else 0
-        self.model = EnsembleMLP(
-            ensemble_size,
-            input_dim,
-            output_dim,
-            hidden_sizes,
-            norm_layer,
-            activation,
-            device=device
-        )
-        self.output_dim = self.model.output_dim
-
-    def forward(
-        self,
-        obs: Union[np.ndarray, torch.Tensor],
-        state: Any = None,
-    ) -> Tuple[torch.Tensor, Any]:
-        """Mapping: s -> flatten (inside MLP)-> logits."""
-        logits = self.model(obs)
-        if self.softmax:
-            logits = torch.softmax(logits, dim=-1)
-        return logits, state
+        if inputs.dim() > 2:
+            inputs = inputs.flatten(2)
+        return self.model(inputs)  # type: ignore
 
 
 class Gaussian(nn.Module):
