@@ -95,9 +95,37 @@ class ReplayBufferManager(ReplayBuffer):
                 self._lengths
             )[0]
 
-    def update(self, buffer: ReplayBuffer) -> np.ndarray:
-        """The ReplayBufferManager cannot be updated by any buffer."""
-        raise NotImplementedError
+    def update(self, buffer: "ReplayBuffer") -> np.ndarray:
+        """Move the data from the given buffer manager to current buffer manager.
+
+        Return the updated indices. If update fails, return an empty array.
+        """
+        if len(buffer) == 0 or self.maxsize == 0:
+            return np.array([], int)
+        assert isinstance(buffer, ReplayBufferManager) and \
+            buffer.buffer_num == self.buffer_num
+        from_indices_global = []
+        to_indices_global = []
+        for i in range(self.buffer_num):
+            buf = buffer.buffers[i]
+            to_indices_local = self.buffers[i].update(buf)
+            from_indices_local = np.concatenate(
+                [np.arange(buf._index, buf._size),
+                 np.arange(buf._index)]
+            )
+            from_indices_global.append(from_indices_local + buffer._offset[i])
+            to_indices_global.append(to_indices_local + self._offset[i])
+
+        sizes = self._extend_offset[1:] - self._offset
+        self._lengths = np.minimum(self._lengths + buffer._lengths, sizes)
+        self.last_index = (self.last_index + buffer._lengths) % sizes
+        from_indices_global = np.concatenate(from_indices_global, axis=0)
+        to_indices_global = np.concatenate(to_indices_global, axis=0)
+        if self._meta.is_empty():
+            self._meta = _create_value(  # type: ignore
+                buffer._meta, self.maxsize, stack=False)
+        self._meta[to_indices_global] = buffer._meta[from_indices_global]
+        return to_indices_global
 
     def add(
         self,
