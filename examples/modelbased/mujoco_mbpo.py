@@ -202,6 +202,8 @@ def test_mbpo(args=get_args()):
         terminal_fn,
         real_ratio=args.real_ratio,
         virtual_env_num=args.virtual_env_num,
+        ensemble_size=args.ensemble_size,
+        num_elites=args.num_elites,
         deterministic_model_eval=args.deterministic,
         device=args.device,
     )
@@ -249,7 +251,8 @@ def test_mbpo(args=get_args()):
             args.virtual_env_num * \
             args.step_per_epoch // \
             args.model_train_freq
-        policy.update_model_buffer(new_size)
+        if new_size > policy.model_buffer.maxsize:
+            policy.update_model_buffer(new_size)
 
         # Set learn model flag
         if step == 0 or step % args.model_train_freq == 0:

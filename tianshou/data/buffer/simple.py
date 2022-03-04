@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -13,20 +13,20 @@ class SimpleReplayBuffer(ReplayBuffer):
     SimpleReplayBuffer adds a sequence of data by directly filling in samples. It \
     ignores sequence information in an episode.
 
-    :param int size: the maximum size of replay buffer.
+    .. seealso::
+
+        Please refer to :class:`~tianshou.data.ReplayBuffer` for other APIs' usage.
     """
 
     def __init__(
         self,
         size: int,
+        **kwargs: Any
     ) -> None:
-        self.maxsize = size
-        self._meta: Batch = Batch()
-        self.reset()
-
-    def reset(self) -> None:
-        """Clear all the data in replay buffer."""
-        self._index = self._size = 0
+        self._meta: Batch
+        self._index: int
+        self._size: int
+        super().__init__(size)
 
     def unfinished_index(self) -> np.ndarray:
         """Return the index of unfinished episode."""
@@ -52,15 +52,11 @@ class SimpleReplayBuffer(ReplayBuffer):
         to_indices = np.arange(self._index, self._index + num_samples) % self.maxsize
         return to_indices
 
-    def _add_index(self, rew: Union[float, np.ndarray],
-                   done: bool) -> Tuple[int, Union[float, np.ndarray], int, int]:
-        """Deprecated."""
-        raise NotImplementedError
-
     def add(
         self,
         batch: Batch,
-    ) -> Tuple[int, int, int, int]:
+        buffer_ids: Optional[Union[np.ndarray, List[int]]] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Add a batch of data into SimpleReplayBuffer.
 
         :param Batch batch: the input data batch. Its keys must belong to the 7
@@ -69,10 +65,10 @@ class SimpleReplayBuffer(ReplayBuffer):
         Return current_index and constants to keep compatability
         """
         # preprocess batch
-        b = Batch()
+        new_batch = Batch()
         for key in set(self._reserved_keys).intersection(batch.keys()):
-            b.__dict__[key] = batch[key]
-        batch = b
+            new_batch.__dict__[key] = batch[key]
+        batch = new_batch
         assert set(["obs", "act", "rew", "done"]).issubset(batch.keys())
 
         num_samples = len(batch)
@@ -83,86 +79,13 @@ class SimpleReplayBuffer(ReplayBuffer):
         try:
             self._meta[indices] = batch
         except ValueError:
-            stack = False
             batch.rew = batch.rew.astype(float)
             batch.done = batch.done.astype(bool)
             if self._meta.is_empty():
                 self._meta = _create_value(  # type: ignore
-                    batch, self.maxsize, stack
+                    batch, self.maxsize, False
                 )
             else:  # dynamic key pops up in batch
-                _alloc_by_keys_diff(self._meta, batch, self.maxsize, stack)
+                _alloc_by_keys_diff(self._meta, batch, self.maxsize, False)
             self._meta[indices] = batch
-        return ptr, 0, 0, 0
-
-    def sample_indices(self, batch_size: int) -> np.ndarray:
-        """Get a random sample of index with size = batch_size.
-
-        Return all available indices in the buffer if batch_size is 0; return an empty
-        numpy array if batch_size < 0 or no available index can be sampled.
-        """
-        if batch_size > 0:
-            return np.random.choice(self._size, batch_size)
-        elif batch_size == 0:  # construct current available indices
-            return np.concatenate(
-                [np.arange(self._index, self._size),
-                 np.arange(self._index)]
-            )
-        else:
-            return np.array([], int)
-
-    def sample(self, batch_size: int) -> Tuple[Batch, np.ndarray]:
-        """Get a random sample from buffer with size = batch_size.
-
-        Return all the data in the buffer if batch_size is 0.
-
-        :return: Sample data and its corresponding index inside the buffer.
-        """
-        indices = self.sample_indices(batch_size)
-        return self[indices], indices
-
-    def get(
-        self,
-        index: Union[int, List[int], np.ndarray],
-        key: str,
-        default_value: Any = None,
-    ) -> Union[Batch, np.ndarray]:
-        """Return self.key[index] or default_value.
-
-        E.g., if you set ``key = "obs", stack_num = 4, index = t``, it returns the
-        stacked result as ``[obs[t-3], obs[t-2], obs[t-1], obs[t]]``.
-
-        :param index: the index for getting stacked data.
-        :param str key: the key to get, should be one of the reserved_keys.
-        :param default_value: if the given key's data is not found and default_value is
-            set, return this default_value.
-        """
-        if key not in self._meta and default_value is not None:
-            return default_value
-        val = self._meta[key]
-        try:
-            return val[index]
-        except IndexError as e:
-            if not (isinstance(val, Batch) and val.is_empty()):
-                raise e  # val != Batch()
-            return Batch()
-
-    def __getitem__(self, index: Union[slice, int, List[int], np.ndarray]) -> Batch:
-        """Return a data batch: self[index]."""
-        if isinstance(index, slice):  # change slice to np array
-            # buffer[:] will get all available data
-            indices = self.sample_indices(0) if index == slice(None) \
-                else self._indices[:len(self)][index]
-        else:
-            indices = index
-        # raise KeyError first instead of AttributeError,
-        # to support np.array([SimpleReplayBuffer()])
-        return Batch(
-            obs=self.obs[indices],
-            act=self.act[indices],
-            rew=self.rew[indices],
-            done=self.done[indices],
-            obs_next=self.obs_next[indices],
-            info=self.get(indices, "info", Batch()),
-            policy=self.get(indices, "policy", Batch()),
-        )
+        return np.array([ptr]), np.array([0.]), np.array([0]), np.array([0])

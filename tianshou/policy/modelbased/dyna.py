@@ -77,6 +77,8 @@ class DynaPolicy(BasePolicy):
 
         :param np.ndarray obs: observation.
         :param np.ndarray act: action.
+
+        :return: A tuple of 4 numpy arrays.
         """
         pass
 

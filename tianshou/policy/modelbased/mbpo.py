@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.distributions import Independent, Normal
 
-from tianshou.data import Batch, ReplayBuffer, to_numpy
+from tianshou.data import Batch, ReplayBuffer, VectorReplayBuffer, to_numpy
 from tianshou.policy import BasePolicy, DynaPolicy
 
 
@@ -28,7 +28,9 @@ class MBPOPolicy(DynaPolicy):
     :param int num_elites: number of elite sub-networks.
     :param bool deterministic_model_eval: whether to rollout deterministically.
     :param Optional[Union[str, int, torch.device]] device: device for training.
-    :param model_args: arguments for model learning.
+    :param Dict[str, Any] model_args: arguments for model learning.
+    :param Dict[str, Any] model_buffer_args: Extra arguments for the
+        model replay buffer.
 
     .. seealso::
 
@@ -49,6 +51,7 @@ class MBPOPolicy(DynaPolicy):
         num_elites: int = 5,
         deterministic_model_eval: bool = False,
         model_args: Dict[str, Any] = {},
+        model_buffer_args: Dict[str, Any] = {},
         device: Optional[Union[str, int, torch.device]] = None,
         **kwargs: Any
     ) -> None:
@@ -62,6 +65,7 @@ class MBPOPolicy(DynaPolicy):
             model_args=model_args
         )
 
+        self.reset_model_buffer(virtual_env_num, **model_buffer_args)
         self.ensemble_size = ensemble_size
         self.num_elites = num_elites
         self.elite_indices = np.arange(num_elites)
@@ -74,14 +78,17 @@ class MBPOPolicy(DynaPolicy):
     def update_model_buffer(
         self,
         new_size: int,
+        **kwargs: Any
     ) -> None:
         """Expand the size of the model buffer."""
-        if new_size > self.model_buffer.maxsize:
-            temp_buffer = self.model_buffer
-            self.reset_model_buffer(new_size)
-            self.model_buffer.update(temp_buffer)
+        temp_buffer = self.model_buffer
+        self.reset_model_buffer(new_size, **kwargs)
+        self.model_buffer.update(temp_buffer)
 
-    def _form_model_train_io(self, batch: Batch) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _form_model_train_io(
+        self,
+        batch: Batch
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Form the input and output tensor for model training."""
         obs = batch.obs
         act = batch.act
@@ -116,12 +123,12 @@ class MBPOPolicy(DynaPolicy):
         train_num = int(total_num * holdout_ratio)
         val_num = total_num - train_num
         permutation = np.random.permutation(total_num)
-
         train_batch = buffer[permutation[:train_num]]
+        train_size = (self.ensemble_size, train_num)
         val_batch = buffer[permutation[train_num:]]
         train_indices = np.random.randint(
             train_num,
-            size=(self.ensemble_size, train_num),
+            size=train_size,
         )
 
         epoch_iter: Iterable
@@ -136,10 +143,13 @@ class MBPOPolicy(DynaPolicy):
         train_loss = 0.
         for _ in epoch_iter:
             self.model.train()
-            for iteration in range(train_num // model_learn_batch_size + 1):
+            # Shuffle along the batch axis
+            idx = np.random.random(train_size).argsort(axis=-1)
+            train_indices = np.take_along_axis(train_indices, idx, axis=-1)
+
+            num_iter = int(np.ceil(train_num / model_learn_batch_size))
+            for iteration in range(num_iter):
                 start = iteration * model_learn_batch_size
-                if start >= train_num:
-                    break
                 end = (iteration + 1) * model_learn_batch_size
                 batch = train_batch[train_indices[:, start:end]]
                 inputs, target = self._form_model_train_io(batch)
@@ -152,11 +162,10 @@ class MBPOPolicy(DynaPolicy):
                 train_iter += 1
 
             self.model.eval()
+            num_iter = int(np.ceil(val_num / model_learn_batch_size))
             val_mse = np.zeros(self.ensemble_size)
-            for iteration in range(val_num // model_learn_batch_size + 1):
+            for iteration in range(num_iter):
                 start = iteration * model_learn_batch_size
-                if start >= val_num:
-                    break
                 end = (iteration + 1) * model_learn_batch_size
                 batch = val_batch[start:end]
                 inputs, target = self._form_model_train_io(batch)
