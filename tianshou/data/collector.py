@@ -226,6 +226,7 @@ class Collector(object):
                     ]
                 except TypeError:  # envpool's action space is not for per-env
                     act_sample = [self._action_space.sample() for _ in ready_env_ids]
+                act_sample = self.policy.map_action_inverse(act_sample)  # type: ignore
                 self.data.update(act=act_sample)
             else:
                 if no_grad:
@@ -364,6 +365,7 @@ class AsyncCollector(Collector):
         exploration_noise: bool = False,
     ) -> None:
         # assert env.is_async
+        warnings.warn("Using async setting may collect extra transitions into buffer.")
         super().__init__(policy, env, buffer, preprocess_fn, exploration_noise)
 
     def reset_env(self) -> None:
@@ -424,7 +426,6 @@ class AsyncCollector(Collector):
                 "Please specify at least one (either n_step or n_episode) "
                 "in AsyncCollector.collect()."
             )
-        warnings.warn("Using async setting may collect extra transitions into buffer.")
 
         ready_env_ids = self._ready_env_ids
 
@@ -451,6 +452,7 @@ class AsyncCollector(Collector):
                     ]
                 except TypeError:  # envpool's action space is not for per-env
                     act_sample = [self._action_space.sample() for _ in ready_env_ids]
+                act_sample = self.policy.map_action_inverse(act_sample)  # type: ignore
                 self.data.update(act=act_sample)
             else:
                 if no_grad:
