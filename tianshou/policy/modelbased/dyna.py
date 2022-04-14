@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Any, Dict, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -14,9 +14,9 @@ class DynaPolicy(BasePolicy):
     Dyna is a model-based algorithmic framework which builds on a model-free method
         with augmented data from rollouts in the learned model.
 
-    :param BasePolicy policy: a model-free base policy.
-    :param nn.Module model: the transition model.
-    :param torch.optim.Optimizer: the optimizer for the model.
+    :param BasePolicy policy: a model-free method for policy optimization.
+    :param nn.Module model: the transition dynamics model.
+    :param torch.optim.Optimizer model_optim: the optimizer for model training.
     :param Type[ReplayBuffer] model_buffer_type: type of buffer to store
         model rollouts.
     :param float real_ratio: ratio of data from real environment interactions when
@@ -55,7 +55,7 @@ class DynaPolicy(BasePolicy):
     def reset_model_buffer(self, max_size: int, *args: Any, **kwargs: Any) -> None:
         """Initialize or reset model buffer.
 
-        :param max_size: buffer capacity.
+        :param int max_size: buffer capacity.
         """
         self.model_buffer = self._model_buffer_type(max_size, *args, **kwargs)
 
@@ -65,54 +65,78 @@ class DynaPolicy(BasePolicy):
         pass
 
     @abstractmethod
-    def _rollout_reset(self, buffer: ReplayBuffer, **kwargs: Any) -> np.ndarray:
-        """Get initial states."""
+    def _rollout_reset(
+        self,
+        buffer: ReplayBuffer,
+        num_envs: Optional[int] = None,
+        **kwargs: Any
+    ) -> np.ndarray:
+        """Get initial states for rollout.
+
+        :param ReplayBuffer buffer: Replay buffer to sample initial states.
+        :param Optional[int] num_envs: Number of initial states.
+        """
         pass
 
     @abstractmethod
     def _rollout_step(
-        self, obs: np.ndarray, act: np.ndarray, **kwargs: Any
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        self, obs: np.ndarray, info: Dict[str, Any], **kwargs: Any
+    ) -> Tuple[Batch, Dict[str, Any]]:
         """Take a step in the learned model.
 
         :param np.ndarray obs: observation.
         :param np.ndarray act: action.
 
-        :return: A tuple of 4 numpy arrays.
+        :return: A Batch to be added to model buffer and step metrics.
         """
         pass
 
-    def _rollout(self, buffer: ReplayBuffer, **kwargs: Any) -> None:
+    def _postprocess_info(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Process info to be logged.
+
+        :param Dict[str, Any] info: information from rollout steps.
+
+        :return: Information to be logged.
+        """
+        info.pop("obs_next", None)
+        info.pop("done", None)
+        return info
+
+    def _rollout(
+        self,
+        buffer: ReplayBuffer,
+        auto_reset: bool = False,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
         """Collect data to model buffer by rolling out the learned model.
 
-        :param buffer: replay buffer for the real environment.
+        :param ReplayBuffer buffer: replay buffer for the real environment.
+        :param bool auto_reset: automatically reset terminal virtual environments.
         """
-        data = Batch(obs={}, act={}, rew={}, done={}, obs_next={}, info={}, policy={})
+        self.model.eval()
         obs = self._rollout_reset(buffer)
-        data.update(obs=obs)
-        for _ in range(self._rollout_length):
-            with torch.no_grad():
-                act = to_numpy(self(data).act)
-                obs_next, rew, done, info = self._rollout_step(
-                    obs,
-                    act  # type: ignore
-                )
-            data.update(
-                act=act,
-                obs_next=obs_next,
-                rew=rew,
-                done=done,
-                info=info,
-            )
-            self.model_buffer.add(data)
+        info = dict(length=0, num_samples=0)
+        while info["length"] < self._rollout_length:
+            if len(obs) == 0:
+                break
+            info["length"] += 1
+            buffer_batch, info = self._rollout_step(obs, info)
+            self.model_buffer.add(buffer_batch)
 
+            obs_next = info.get("obs_next", None)
+            done = info.get("done", None)
             if np.any(done):
                 done_indices = np.where(done)[0]
-                batch, _ = buffer.sample(len(done_indices))
-                obs_reset = batch.obs.copy()
-                obs_next[done_indices] = obs_reset
-            obs = obs_next
-            data.update(obs=obs)
+                if auto_reset:
+                    obs_reset = self._rollout_reset(buffer, len(done_indices))
+                    obs_next[done_indices] = obs_reset
+                else:
+                    obs_next = obs_next[~done]
+
+            obs = obs_next.copy()
+
+        rollout_metrics = self._postprocess_info(info)
+        return rollout_metrics
 
     def train(self, mode: bool = True) -> "DynaPolicy":
         """Set the base policy in training mode."""
@@ -130,7 +154,17 @@ class DynaPolicy(BasePolicy):
         **kwargs: Any,
     ) -> Batch:
         """Compute action over the given batch data by inner policy."""
-        return self.policy.forward(batch, state, **kwargs)
+        return self.policy(batch, state, **kwargs)
+
+    def map_action(self, act: Union[Batch, np.ndarray]) -> Union[Batch, np.ndarray]:
+        """Map raw network output to action range in gym's env.action_space."""
+        return self.policy.map_action(act)
+
+    def map_action_inverse(
+        self, act: Union[Batch, List, np.ndarray]
+    ) -> Union[Batch, List, np.ndarray]:
+        """Inverse operation to :meth:`~tianshou.policy.BasePolicy.map_action`."""
+        return self.policy.map_action_inverse(act)
 
     def set_rollout_length(self, length: int) -> None:
         """Rollout length setter."""
@@ -149,6 +183,12 @@ class DynaPolicy(BasePolicy):
         """Update policy with a given batch of data by inner policy."""
         return self.policy.learn(batch, **kwargs)
 
+    def post_process_fn(
+        self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
+    ) -> None:
+        """Post-process the data from the provided replay buffer."""
+        self.policy.post_process_fn(batch, buffer, indices)
+
     def update(self, sample_size: int, buffer: Optional[ReplayBuffer],
                **kwargs: Any) -> Dict[str, Any]:
         """Update the policy network and replay buffer."""
@@ -157,7 +197,9 @@ class DynaPolicy(BasePolicy):
         if self._learn_model_flag:
             result = self._learn_model(buffer, **self._model_args)
             self.results.update(result)
-            self._rollout(buffer)
+            with torch.no_grad():
+                result = self._rollout(buffer, **self._model_args)
+            self.results.update(result)
             self.set_learn_model_flag(False)
         env_sample_size = int(sample_size * self._real_ratio)
         model_sample_size = sample_size - env_sample_size

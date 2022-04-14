@@ -5,8 +5,9 @@ import numpy as np
 import torch
 from torch.distributions import Independent, Normal
 
-from tianshou.data import Batch, ReplayBuffer, VectorReplayBuffer, to_numpy
+from tianshou.data import Batch, ReplayBuffer, to_numpy
 from tianshou.policy import BasePolicy, DynaPolicy
+from tianshou.utils import Normalizer
 
 
 class MBPOPolicy(DynaPolicy):
@@ -14,9 +15,9 @@ class MBPOPolicy(DynaPolicy):
 
     MBPO builds on Dyna framework with branch rollout.
 
-    :param BasePolicy policy: a model-free base policy.
-    :param nn.Module model: the transition model.
-    :param torch.optim.Optimizer: the optimizer for the model.
+    :param BasePolicy policy: a model-free method for policy optimization.
+    :param nn.Module model: the transition dynamics model.
+    :param torch.optim.Optimizer model_optim: the optimizer for model training.
     :param Type[ReplayBuffer] model_buffer_type: type of buffer to store
         model rollouts.
     :param Callable loss_fn: loss function for model training.
@@ -72,7 +73,7 @@ class MBPOPolicy(DynaPolicy):
         self._deterministic_model_eval = deterministic_model_eval
         self._loss_fn = loss_fn
         self._terminal_fn = terminal_fn
-        self._best = np.full(ensemble_size, 1e10, dtype=float)
+        self.normalizer = Normalizer()
         self.device = device
 
     def update_model_buffer(
@@ -87,7 +88,8 @@ class MBPOPolicy(DynaPolicy):
 
     def _form_model_train_io(
         self,
-        batch: Batch
+        batch: Batch,
+        fit_normalizer: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Form the input and output tensor for model training."""
         obs = batch.obs
@@ -96,6 +98,9 @@ class MBPOPolicy(DynaPolicy):
         delta_obs = obs_next - obs
         rew = batch.rew
         inputs = np.concatenate((obs, act), axis=-1)
+        if fit_normalizer:
+            self.normalizer.fit(inputs)
+        inputs = self.normalizer.transform(inputs)
         inputs = torch.as_tensor(
             inputs,
             device=self.device,  # type: ignore
@@ -112,24 +117,32 @@ class MBPOPolicy(DynaPolicy):
     def _learn_model(
         self,
         buffer: ReplayBuffer,
-        holdout_ratio: float = 0.8,
+        val_ratio: float = 0.2,
+        max_val_num: int = 5000,
         model_learn_batch_size: int = 256,
         max_epoch: Optional[int] = None,
         max_static_epoch: int = 5,
         **kwargs: Any
     ) -> Dict[str, Union[float, int]]:
-        """Learn the transition model."""
+        """Learn the transition model.
+        
+        """
         total_num = len(buffer)
-        train_num = int(total_num * holdout_ratio)
-        val_num = total_num - train_num
+        val_num = min(int(total_num * val_ratio), max_val_num)
+        train_num = total_num - val_num
         permutation = np.random.permutation(total_num)
         train_batch = buffer[permutation[:train_num]]
+        train_inputs, train_target = self._form_model_train_io(
+            train_batch,
+            fit_normalizer=True,
+        )
         train_size = (self.ensemble_size, train_num)
-        val_batch = buffer[permutation[train_num:]]
         train_indices = np.random.randint(
             train_num,
             size=train_size,
         )
+        val_batch = buffer[permutation[train_num:]]
+        val_inputs, val_target = self._form_model_train_io(val_batch)
 
         epoch_iter: Iterable
         if max_epoch is None:
@@ -141,6 +154,7 @@ class MBPOPolicy(DynaPolicy):
         epochs_this_train = 0
         train_iter = 0
         train_loss = 0.
+        best = np.full(self.ensemble_size, 1e10, dtype=float)
         for _ in epoch_iter:
             self.model.train()
             # Shuffle along the batch axis
@@ -151,8 +165,9 @@ class MBPOPolicy(DynaPolicy):
             for iteration in range(num_iter):
                 start = iteration * model_learn_batch_size
                 end = (iteration + 1) * model_learn_batch_size
-                batch = train_batch[train_indices[:, start:end]]
-                inputs, target = self._form_model_train_io(batch)
+                indice = torch.as_tensor(train_indices[:, start:end])
+                inputs = train_inputs[indice]
+                target = train_target[indice]
                 mean, logvar, max_logvar, min_logvar = self.model(inputs)
                 loss = self._loss_fn(mean, logvar, max_logvar, min_logvar, target)
                 self.model_optim.zero_grad()
@@ -164,22 +179,18 @@ class MBPOPolicy(DynaPolicy):
             self.model.eval()
             num_iter = int(np.ceil(val_num / model_learn_batch_size))
             val_mse = np.zeros(self.ensemble_size)
-            for iteration in range(num_iter):
-                start = iteration * model_learn_batch_size
-                end = (iteration + 1) * model_learn_batch_size
-                batch = val_batch[start:end]
-                inputs, target = self._form_model_train_io(batch)
-                with torch.no_grad():
-                    mean, _, _, _ = self.model(inputs)
-                batch_mse = torch.mean(torch.square(mean - target),
-                                       dim=(1, 2)).cpu().numpy()
-                val_mse = (val_mse * iteration + batch_mse) / (iteration + 1)
+            with torch.no_grad():
+                mean, _, _, _ = self.model(val_inputs)
+            val_mse = torch.mean(
+                torch.square(mean - val_target),
+                dim=(1, 2)
+            ).cpu().numpy()
 
             epochs_this_train += 1
-            improvement = (self._best - val_mse) / self._best
+            improvement = (best - val_mse) / best
             update_flags = improvement > 0.01
             updated = np.any(update_flags)
-            self._best[update_flags] = val_mse[update_flags]
+            best[update_flags] = val_mse[update_flags]
 
             if updated:
                 epochs_since_update = 0
@@ -192,47 +203,92 @@ class MBPOPolicy(DynaPolicy):
         self.elite_indices = np.argsort(val_mse)[:self.num_elites]
         elite_mse = val_mse[self.elite_indices].mean().item()
 
+        max_logvar = max_logvar.detach().cpu().mean().item()
+        min_logvar = min_logvar.detach().cpu().mean().item()
+
         # Collect training info to be logged.
-        train_info = {
+        train_metrics = {
             "loss/model_train": train_loss,
             "loss/model_val": elite_mse,
             "model_train_epoch": epochs_this_train,
-            "rollout_length": self._rollout_length,
+            "train_num": train_num,
+            "val_num": val_num,
+            "max_logvar": max_logvar,
+            "min_logvar": min_logvar,
         }
 
-        return train_info
+        return train_metrics
 
-    def _rollout_reset(self, buffer: ReplayBuffer, **kwargs: Any) -> np.ndarray:
-        batch, _ = buffer.sample(self._virtual_env_num)
+    def _rollout_reset(
+        self,
+        buffer: ReplayBuffer,
+        num_envs: Optional[int] = None,
+        **kwargs: Any
+    ) -> np.ndarray:
+        if num_envs is None:
+            num_envs = self._virtual_env_num
+        batch, _ = buffer.sample(num_envs)
         obs = batch.obs.copy()
         return obs
 
-    def _rollout_step(
-        self, obs: np.ndarray, act: np.ndarray, **kwargs: Any
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        self.model.eval()
-        inputs = np.concatenate((obs, act), axis=-1)
-        with torch.no_grad():
-            mean, logvar, _, _ = self.model(inputs)
-            std = torch.sqrt(torch.exp(logvar))
-            dist = Independent(Normal(mean, std), 1)
-            if self._deterministic_model_eval:
-                sample = mean
-            else:
-                sample = dist.rsample()
-            log_prob = dist.log_prob(sample)
-            # For each input, choose a network from the ensemble
-            _, batch_size, _ = sample.shape
-            sample = to_numpy(sample)
-            indices = np.random.randint(self.num_elites, size=batch_size)
-            choice_indices = self.elite_indices[indices]
-            batch_indices = np.arange(batch_size)
-            obs_next = obs + sample[choice_indices, batch_indices, :-1]
-            rew = sample[choice_indices, batch_indices, -1]
-            done = self._terminal_fn(obs, act, obs_next)
-            log_prob = log_prob[choice_indices, batch_indices]
-            info = np.array(
-                list(map(lambda x: {"log_prob": x.item()}, torch.split(log_prob, 1)))
-            )
+    def _choose_from_ensemble(
+        self,
+        mean: torch.Tensor,
+        logvar: torch.Tensor,
+    ) -> Tuple[np.ndarray, np.ndarray, torch.Tensor, torch.Tensor]:
+        _, batch_size, _ = mean.shape
+        var = torch.exp(logvar)
 
-        return obs_next, rew, done, info
+        # Choose an output from the elite subnetworks and compute its statistics.
+        choice_indice = np.random.choice(self.elite_indices, size=batch_size)
+        batch_indice = np.arange(batch_size)
+        sample_mean = mean[choice_indice, batch_indice, :]
+        sample_var = var[choice_indice, batch_indice, :]
+        sample_std = torch.sqrt(sample_var)
+        sample_dist = Independent(Normal(sample_mean, sample_std), 1)
+        # Compute the statistics of rest outputs
+        rest_mean = (torch.sum(mean, dim=0) - sample_mean) / (self.ensemble_size - 1)
+        rest_var = (torch.sum(var + mean ** 2, dim=0) - sample_mean ** 2 -
+                    sample_var) / (self.ensemble_size - 1) - rest_mean ** 2
+        rest_std = torch.sqrt(rest_var)
+        rest_dist = Independent(Normal(rest_mean, rest_std), 1)
+        # OvR uncertainty
+        uncertainty = torch.distributions.kl.kl_divergence(sample_dist, rest_dist)
+        # Sample
+        if self._deterministic_model_eval:
+            sample = sample_mean
+        else:
+            sample = sample_dist.rsample()
+        log_prob = sample_dist.log_prob(sample)
+        sample = to_numpy(sample)
+        delta_obs = sample[:, :-1]
+        rew = sample[:, -1]
+
+        return delta_obs, rew, log_prob, uncertainty
+
+    def _rollout_step(
+        self, obs: np.ndarray, info: Dict[str, Any], **kwargs: Any
+    ) -> Tuple[Batch, Dict[str, Any]]:
+        batch = Batch(obs=obs, act={}, rew={}, done={}, obs_next={}, info={}, policy={})
+        act = to_numpy(self(batch).act)
+        inputs = np.concatenate((obs, act), axis=-1)
+        inputs = self.normalizer.transform(inputs)
+        mean, logvar, _, _ = self.model(inputs)
+        delta_obs, rew, _, _ = self._choose_from_ensemble(mean, logvar)
+        obs_next = obs + delta_obs
+        done = self._terminal_fn(obs, act, obs_next)
+
+        batch.update(
+            act=act,
+            obs_next=obs_next,
+            rew=rew,
+            done=done,
+        )
+        num_samples = info.get("num_samples", 0)
+        info.update(
+            num_samples=num_samples + len(obs),
+            obs_next=obs_next.copy(),
+            done=done.copy(),
+        )
+
+        return batch, info
