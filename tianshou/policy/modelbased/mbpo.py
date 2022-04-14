@@ -7,7 +7,7 @@ from torch.distributions import Independent, Normal
 
 from tianshou.data import Batch, ReplayBuffer, to_numpy
 from tianshou.policy import BasePolicy, DynaPolicy
-from tianshou.utils import Normalizer
+from tianshou.utils.statistics import Normalizer
 
 
 class MBPOPolicy(DynaPolicy):
@@ -28,10 +28,10 @@ class MBPOPolicy(DynaPolicy):
     :param int ensemble_size: number of sub-networks in the ensemble.
     :param int num_elites: number of elite sub-networks.
     :param bool deterministic_model_eval: whether to rollout deterministically.
-    :param Optional[Union[str, int, torch.device]] device: device for training.
     :param Dict[str, Any] model_args: arguments for model learning.
     :param Dict[str, Any] model_buffer_args: Extra arguments for the
         model replay buffer.
+    :param Optional[Union[str, int, torch.device]] device: device for training.
 
     .. seealso::
 
