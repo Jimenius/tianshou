@@ -35,7 +35,7 @@ class GaussianMLELoss(nn.Module):
         inv_var = torch.exp(-logvar)
         mse = torch.mean(torch.square(mean - target) * inv_var)
         var_loss = torch.mean(logvar)
-        opt_loss = self._coeff * (torch.sum(max_logvar) - torch.sum(min_logvar))
+        opt_loss = self._coeff * (torch.mean(max_logvar - min_logvar))
         loss = mse + var_loss + opt_loss
 
         return loss

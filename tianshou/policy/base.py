@@ -202,7 +202,7 @@ class BasePolicy(ABC, nn.Module):
                     scale[scale < eps] += eps
                     act = (act - low) * 2.0 / scale - 1.0
                 if self.action_bound_method == "tanh":
-                    act = (np.log(1.0 + act) - np.log(1.0 - act)) / 2.0  # type: ignore
+                    act = np.arctanh(act)  # type: ignore
         return act
 
     def process_fn(
